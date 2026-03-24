@@ -4,123 +4,200 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-AzerothCore is an open-source MMORPG server emulator for World of Warcraft patch 3.3.5a (Wrath of the Lich King). It's a C++ project built with CMake, using MySQL for data storage. Licensed under GNU GPL v2.
+This is the **mod-playerbots fork** of AzerothCore (`https://github.com/mod-playerbots/azerothcore-wotlk`), branch `Playerbot`. The Playerbot AI system is built directly into the core (not a separate module). The goal is a private WotLK 3.3.5a server with ~600 AI bots, transmog, auction house bots, autobalance, and NPC buffer — with friends able to join remotely.
+
+- Authserver port: **3724**
+- Worldserver port: **8085**
+- Install prefix: `$HOME/azeroth-server`
+- Working directory: `/home/sykx/SS/azerothcore-wotlk`
 
 ## Build Commands
 
-### Configure and build (out-of-source build required)
-
-- Skip building unless explicitly requested.
+**Skip building unless explicitly requested. All builds must run inside WSL Ubuntu, not Windows/MSYS2.**
 
 ```bash
-# Create build directory and configure
-mkdir -p build && cd build
-cmake .. -DCMAKE_INSTALL_PREFIX=$HOME/azeroth-server -DCMAKE_BUILD_TYPE=RelWithDebInfo \
-  -DSCRIPTS=static -DMODULES=static
+# Open WSL terminal, then:
+mkdir -p ~/SS/azerothcore-wotlk/build && cd ~/SS/azerothcore-wotlk/build
+cmake .. \
+  -DCMAKE_INSTALL_PREFIX=$HOME/azeroth-server \
+  -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+  -DSCRIPTS=static \
+  -DMODULES=static
 
-# Build (use appropriate core count)
 make -j$(nproc)
 make install
 ```
 
-### Key CMake options
-
-- `SCRIPTS`: none, static, dynamic, minimal-static, minimal-dynamic (default: static)
-- `MODULES`: none, static, dynamic (default: static)
-- `APPS_BUILD`: none, all, auth-only, world-only (default: all)
-- `TOOLS_BUILD`: none, all, db-only, maps-only (default: none)
-- `BUILD_TESTING`: Enable unit tests (default: OFF)
-- `USE_COREPCH` / `USE_SCRIPTPCH`: Precompiled headers (default: ON)
-
-### Unit tests
-
+**Map extractor tools** (build separately after main build):
 ```bash
-# Configure with testing enabled
-cmake .. -DBUILD_TESTING=ON
-make -j$(nproc)
-
-# Run tests
-./src/test/unit_tests
-# or
-ctest
+cd ~/SS/azerothcore-wotlk/build
+cmake .. -DTOOLS_BUILD=maps-only
+make -j$(nproc) map_extractor vmap4_extractor vmap4_assembler mmaps_generator
+make install
+# Tools install to ~/azeroth-server/bin/
 ```
 
-Tests use Google Test and live in `src/test/`. The test binary links against the `game` library.
+**Map extraction** (run from WoW client dir, takes ~20-30 min total):
+```bash
+cd '/mnt/c/Program Files (x86)/WoW'
+~/azeroth-server/bin/map_extractor
+~/azeroth-server/bin/vmap4_extractor       # skip if Buildings/ folder already exists
+~/azeroth-server/bin/vmap4_assembler Buildings vmaps
+~/azeroth-server/bin/mmaps_generator
+# Then move maps/ vmaps/ dbc/ Cameras/ mmaps/ to ~/azeroth-server/data/
+```
+
+Note: Tool target names use underscores: `map_extractor`, `vmap4_extractor`, `vmap4_assembler`, `mmaps_generator`.
+
+### Key CMake options
+- `SCRIPTS`: none, static, dynamic (default: static)
+- `MODULES`: none, static, dynamic (default: static)
+- `PLAYERBOTS`: 1 to enable if the flag exists in this fork
+- `TOOLS_BUILD`: none, all, db-only, maps-only (default: none) — set to `maps-only` to build map extractors
+- `USE_COREPCH` / `USE_SCRIPTPCH`: Precompiled headers (default: ON)
+
+## Four Databases Required
+
+This setup uses **4 databases** (not 3 like standard AzerothCore):
+- `acore_auth` — Accounts, realm list
+- `acore_characters` — Characters, inventories
+- `acore_world` — Game content
+- `acore_playerbots` — Bot AI state, travel nodes, guild/arena names (required by mod-playerbots)
+
+**First-time DB setup:**
+```bash
+# Create acore_playerbots and grant access
+mysql -u root -e "
+  CREATE DATABASE IF NOT EXISTS acore_playerbots DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+  GRANT ALL PRIVILEGES ON acore_playerbots.* TO 'acore'@'localhost';
+  FLUSH PRIVILEGES;"
+
+# Import playerbots base SQL (worldserver auto-updates after this)
+cd ~/SS/azerothcore-wotlk/modules/mod-playerbots/data/sql/playerbots/base
+for f in $(ls *.sql | sort); do mysql -u acore -pacore acore_playerbots < "$f" 2>/dev/null; done
+```
+
+**If world DB is missing tables** (e.g. after fresh clone with old DB): reimport base schema:
+```bash
+mysql -u acore -pacore -e 'DROP DATABASE acore_world; CREATE DATABASE acore_world DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;'
+cd ~/SS/azerothcore-wotlk/data/sql/base/db_world
+for f in $(ls *.sql | sort); do mysql -u acore -pacore acore_world < "$f" 2>/dev/null; done
+# worldserver will auto-apply pending updates on next start
+```
+
+**worldserver restarts after applying DB updates** — this is normal. Run it again and it will load fully once all updates are applied. If an update fails mid-run, apply remaining SQL files manually and insert them into the `updates` table.
+
+## Installed Modules (`modules/`)
+
+These are cloned and will be compiled automatically when `MODULES=static`:
+
+| Module | Purpose |
+|--------|---------|
+| `mod-ah-bot` | Populates the Auction House with bot listings |
+| `mod-autobalance` | Scales dungeon/raid difficulty to party size |
+| `mod-transmog` | Transmogrification NPC and system |
+| `mod-npc-buffer` | NPC that casts buffs on players for free |
+
+Each module has its own SQL files under `modules/<name>/data/sql/` that are auto-applied on first worldserver start.
 
 ## Architecture
 
 ### Two server executables
-- **authserver** (`src/server/apps/authserver/`): Handles authentication and realm selection (port 3724)
-- **worldserver** (`src/server/apps/worldserver/`): Main game server handling all gameplay (port 8085)
+- **authserver** (`src/server/apps/authserver/`): Authentication and realm selection
+- **worldserver** (`src/server/apps/worldserver/`): All gameplay
 
-### Source layout (`src/`)
+### Source layout
+- `src/common/` — Networking, crypto, config, logging, threading, utilities
+- `src/server/game/` — Core game logic (~52 subsystems): Entities, Spells, Maps, AI, Handlers, Scripting, Server
+- `src/server/scripts/` — Boss/spell/instance/command content scripts
+- `src/server/database/` — Database abstraction layer
+- `src/server/shared/` — Shared between auth and world servers
 
-- **`src/common/`** - Shared libraries: networking (Asio), cryptography, configuration, logging, threading, collision detection, utilities
-- **`src/server/game/`** - Core game logic (~52 subsystems), the heart of the worldserver
-- **`src/server/scripts/`** - Content scripts (bosses, spells, commands, instances)
-- **`src/server/database/`** - Database abstraction layer and schema updater
-- **`src/server/shared/`** - Code shared between auth and world servers (packets, network, realm definitions)
-- **`src/test/`** - Unit tests (Google Test)
-
-### Key game subsystems (`src/server/game/`)
-
-- **Entities/** - Core game objects: `Player`, `Creature`, `Unit`, `Item`, `GameObject`
-- **Spells/** - Spell mechanics, aura system, spell effects
-- **Maps/** - Map management, grid system, instancing
-- **Handlers/** - Client packet handlers (one file per system: `MovementHandler.cpp`, `SpellHandler.cpp`, etc.). These are methods on `WorldSession`
-- **AI/** - Creature AI framework
-- **Scripting/** - Script system with typed base classes (`ScriptObject` subclasses: `CreatureScript`, `SpellScript`, `InstanceMapScript`, `GameObjectScript`, `CommandScript`, etc.)
-- **Server/** - `WorldSession` (per-player connection), `World` (global state), opcode definitions
-
-### Scripting system
-
-Scripts follow a registration pattern:
-1. Define a class inheriting from `SpellScript`, `CreatureScript`, etc.
-2. Implement an `AddSC_*()` function that calls `RegisterSpellScript(ClassName)` (or similar)
-3. The `AddSC_*()` is declared and called from the regional `*_script_loader.cpp`
-4. Script loaders per region: `spells_script_loader.cpp`, `eastern_kingdoms_script_loader.cpp`, `northrend_script_loader.cpp`, etc.
-5. Spell script files are organized by class: `spell_dk.cpp`, `spell_mage.cpp`, `spell_generic.cpp`, etc.
+### Playerbot system (built into core)
+Playerbot source lives under `src/server/game/AI/PlayerAI/` or similar. Key concepts:
+- Bots are real player accounts spawned by the server — they appear in the world as players
+- Bot behavior is driven by `PlayerbotAI` and strategy selectors
+- Config: `worldserver.conf` section `[Playerbot]` — controls bot count, login behavior, strategy
+- Bots can be added via GM command: `.bot add <name>` or auto-spawned at startup
 
 ### Three databases
-- **acore_auth** - Accounts, realm list, bans (`data/sql/base/db_auth/`)
-- **acore_characters** - Character data, inventories, progress (`data/sql/base/db_characters/`)
-- **acore_world** - Game content: creatures, items, quests, spells, loot (`data/sql/base/db_world/`)
+- `acore_auth` — Accounts, realm list
+- `acore_characters` — Characters, inventories, progress
+- `acore_world` — Game content (creatures, items, quests, loot)
 
-- SQL updates go in `data/sql/updates/pending_*` with separate subdirectories per database until pull request is merged. Pending SQL files are assigned random names.
-- SQL updates go in `data/sql/updates/` with separate subdirectories per database after their pull request is merged.
-- SQL files outside the `data/sql/updates/pending_*` folders should never be updated.
+SQL updates: `data/sql/updates/pending_*/<db>/` until merged, then `data/sql/updates/<db>/`.
 
-### Module system
+### Scripting system
+Scripts inherit from `SpellScript`, `CreatureScript`, `InstanceMapScript`, etc. Each script file implements `AddSC_*()` which is called from regional `*_script_loader.cpp` files.
 
-External modules are loaded from the `modules/` directory. Each module is a subdirectory with its own `CMakeLists.txt`. Disable specific modules with `-DDISABLED_AC_MODULES="mod1;mod2"`. Module skeleton: https://github.com/azerothcore/skeleton-module/
+## Configuration for 600 Bots
 
-### Dependencies
+In `$HOME/azeroth-server/etc/worldserver.conf`, set:
 
-Bundled in `deps/`: boost, MySQL client, OpenSSL, zlib, recastnavigation (pathfinding), g3dlite (geometry), fmt, argon2, jemalloc, and others.
+```ini
+# Playerbot settings
+PlayerbotAI.enabled = 1
+PlayerbotAI.maxNumBots = 600
+PlayerbotAI.BotAutologin = 1
+PlayerbotAI.numMinBots = 500
+PlayerbotAI.RandomBotAccountPrefix = "rndbot"
+PlayerbotAI.RandomBotAccountCount = 200
+PlayerbotAI.RandomBotSpawnDelay = 1000
+
+# Spread bots across races and classes
+PlayerbotAI.RandomBotMapsAsString = "0 1 530 571"
+```
+
+Create bot accounts with the in-game GM command:
+```
+.playerbot random init
+```
+Or via the worldserver console after first start.
+
+## AH Bot Configuration
+
+In `$HOME/azeroth-server/etc/worldserver.conf` (added by mod-ah-bot):
+```ini
+AHBot.EnableSeller = 1
+AHBot.EnableBuyer = 1
+AHBot.Account = 1          # AH bot account ID (create a dedicated account)
+AHBot.GUID = 1             # Character GUID of the AH bot character
+AHBot.ItemsPerCycle = 200
+```
+After first start, use `.ahbot items` in-game to check status.
+
+## Autobalance Configuration
+
+In `worldserver.conf` (added by mod-autobalance):
+```ini
+AutoBalance.enable = 1
+AutoBalance.LevelScaling = 1
+AutoBalance.PlayerChangeNotify = 1
+AutoBalance.DungeonScaleDownXP = 0
+```
+
+## Friends Joining (Network Setup)
+
+For friends to connect from outside your LAN:
+1. **Forward ports** on your router: TCP/UDP 3724 (auth) and TCP 8085 (world)
+2. In `acore_auth` DB, update the realmlist: `UPDATE realmlist SET address = 'YOUR_PUBLIC_IP' WHERE id = 1;`
+3. Friends set their `realmlist.wtf` to: `set realmlist YOUR_PUBLIC_IP`
+4. Create accounts for friends with: `.account create <username> <password>` in worldserver console
+
+For LAN-only play: use your LAN IP instead of public IP.
 
 ## Commit Message Format
 
-Uses Conventional Commits:
 ```
-Type(Scope/Subscope): Short description (max 50 chars)
+Type(Scope): Short description
 ```
-
-- **Types**: feat, fix, refactor, style, docs, test, chore
-- **Scopes**: Core (C++ changes), DB (SQL changes)
-- **Examples**: `fix(Core/Spells): Fix damage calculation for Fireball`, `fix(DB/SAI): Missing spell to NPC Hogger`
+Types: feat, fix, refactor, style, docs, test, chore
+Scopes: Core (C++), DB (SQL)
 
 ## Code Style
 
 - 4-space indentation for C++ (no tabs)
-- 2-space indentation for JSON, YAML, shell scripts
-- UTF-8 encoding, LF line endings
-- Max 80 character line length
+- 2-space indentation for JSON/YAML/shell
+- UTF-8, LF line endings, max 80 chars/line
 - No braces around single-line statements
-- Use {} to parse variables into output instead of %u etc.
-- CI enforces code style checks and compiles with `-Werror`
-
-## PR Requirements
-
-- AI tool usage must be disclosed in PRs
-- In-game testing expected
-- Changes to generic code require regression testing of related systems
+- Use `{}` format specifiers, not `%u`/`%s`
