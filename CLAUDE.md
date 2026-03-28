@@ -4,19 +4,37 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-This is the **mod-playerbots fork** of AzerothCore (`https://github.com/mod-playerbots/azerothcore-wotlk`), branch `Playerbot`. The Playerbot AI system is built directly into the core (not a separate module). The goal is a private WotLK 3.3.5a server with ~600 AI bots, transmog, auction house bots, autobalance, and NPC buffer — with friends able to join remotely.
+This is the **mod-playerbots fork** of AzerothCore (`https://github.com/mod-playerbots/azerothcore-wotlk`), branch `Playerbot`. The Playerbot AI system is built directly into the core (not a separate module).
+
+**Server name:** Soul Survivors
+**Vision:** Bleach-inspired WotLK private server — all NPCs, zones, and player content reskinned/converted to Bleach lore. Classless system via Draft Mode (random spell selection per level-up), unique character builds, prestige system. Target: 500 AI bots + friends playing together.
 
 - Authserver port: **3724**
 - Worldserver port: **8085**
 - Install prefix: `$HOME/azeroth-server`
 - Working directory: `/home/sykx/SS/azerothcore-wotlk`
+- Tailscale IP: `100.107.146.103` (friends connect via Tailscale VPN)
+- DB credentials: user `acore` / pass `acore` (local only, never exposed publicly)
+
+## Network & Hosting
+
+- Friends connect via **Tailscale** — they install Tailscale, get approved, set `realmlist.wtf` to `100.107.146.103`
+- Realmlist DB must match: `UPDATE acore_auth.realmlist SET address='100.107.146.103' WHERE id=1;`
+- Your local `realmlist.wtf`: `set realmlist 100.107.146.103`
+- **ProtonVPN must be OFF** while server is running — it breaks Tailscale routing
+- Never expose MySQL port 3306 publicly
+- For truly public hosting: forward TCP/UDP 3724 and TCP 8085 on router only
+
+**Create friend accounts** (worldserver console only, not in-game chat):
+```
+account create <username> <password>
+```
 
 ## Build Commands
 
 **Skip building unless explicitly requested. All builds must run inside WSL Ubuntu, not Windows/MSYS2.**
 
 ```bash
-# Open WSL terminal, then:
 mkdir -p ~/SS/azerothcore-wotlk/build && cd ~/SS/azerothcore-wotlk/build
 cmake .. \
   -DCMAKE_INSTALL_PREFIX=$HOME/azeroth-server \
@@ -28,163 +46,187 @@ make -j$(nproc)
 make install
 ```
 
+**When Eluna is added** (planned), append `-DELUNA=1` to the cmake command.
+
 **Map extractor tools** (build separately after main build):
 ```bash
 cd ~/SS/azerothcore-wotlk/build
 cmake .. -DTOOLS_BUILD=maps-only
 make -j$(nproc) map_extractor vmap4_extractor vmap4_assembler mmaps_generator
 make install
-# Tools install to ~/azeroth-server/bin/
 ```
 
-**Map extraction** (run from WoW client dir, takes ~20-30 min total):
+**Map extraction** (run from WoW client dir, ~20-30 min):
 ```bash
 cd '/mnt/c/Program Files (x86)/WoW'
 ~/azeroth-server/bin/map_extractor
-~/azeroth-server/bin/vmap4_extractor       # skip if Buildings/ folder already exists
+~/azeroth-server/bin/vmap4_extractor
 ~/azeroth-server/bin/vmap4_assembler Buildings vmaps
 ~/azeroth-server/bin/mmaps_generator
-# Then move maps/ vmaps/ dbc/ Cameras/ mmaps/ to ~/azeroth-server/data/
+# Move maps/ vmaps/ dbc/ Cameras/ mmaps/ to ~/azeroth-server/data/
 ```
-
-Note: Tool target names use underscores: `map_extractor`, `vmap4_extractor`, `vmap4_assembler`, `mmaps_generator`.
 
 ### Key CMake options
 - `SCRIPTS`: none, static, dynamic (default: static)
 - `MODULES`: none, static, dynamic (default: static)
-- `PLAYERBOTS`: 1 to enable if the flag exists in this fork
-- `TOOLS_BUILD`: none, all, db-only, maps-only (default: none) — set to `maps-only` to build map extractors
+- `ELUNA`: 1 to enable Lua scripting engine (required for Draft Mode and Lua scripts)
+- `TOOLS_BUILD`: none, all, db-only, maps-only (default: none)
 - `USE_COREPCH` / `USE_SCRIPTPCH`: Precompiled headers (default: ON)
 
 ## Four Databases Required
 
-This setup uses **4 databases** (not 3 like standard AzerothCore):
 - `acore_auth` — Accounts, realm list
 - `acore_characters` — Characters, inventories
 - `acore_world` — Game content
-- `acore_playerbots` — Bot AI state, travel nodes, guild/arena names (required by mod-playerbots)
+- `acore_playerbots` — Bot AI state (required by mod-playerbots)
 
-**First-time DB setup:**
+**DB backup location:** `~/SS/backups/YYYY-MM-DD/`
 ```bash
-# Create acore_playerbots and grant access
-mysql -u root -e "
-  CREATE DATABASE IF NOT EXISTS acore_playerbots DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
-  GRANT ALL PRIVILEGES ON acore_playerbots.* TO 'acore'@'localhost';
-  FLUSH PRIVILEGES;"
+# Backup all 4 DBs
+for db in acore_auth acore_characters acore_world acore_playerbots; do
+  mysqldump -u acore -pacore --single-transaction $db | gzip > ~/SS/backups/$(date +%Y-%m-%d)/$db.sql.gz
+done
 
-# Import playerbots base SQL (worldserver auto-updates after this)
-cd ~/SS/azerothcore-wotlk/modules/mod-playerbots/data/sql/playerbots/base
-for f in $(ls *.sql | sort); do mysql -u acore -pacore acore_playerbots < "$f" 2>/dev/null; done
+# Restore
+for db in acore_auth acore_characters acore_world acore_playerbots; do
+  gunzip -c ~/SS/backups/YYYY-MM-DD/$db.sql.gz | mysql -u acore -pacore $db
+done
 ```
 
-**If world DB is missing tables** (e.g. after fresh clone with old DB): reimport base schema:
-```bash
-mysql -u acore -pacore -e 'DROP DATABASE acore_world; CREATE DATABASE acore_world DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;'
-cd ~/SS/azerothcore-wotlk/data/sql/base/db_world
-for f in $(ls *.sql | sort); do mysql -u acore -pacore acore_world < "$f" 2>/dev/null; done
-# worldserver will auto-apply pending updates on next start
-```
-
-**worldserver restarts after applying DB updates** — this is normal. Run it again and it will load fully once all updates are applied. If an update fails mid-run, apply remaining SQL files manually and insert them into the `updates` table.
+**HeidiSQL connection:** Host `172.24.163.59` (WSL IP, changes on reboot — run `ip addr show eth0 | grep inet`), port 3306, user `acore`, pass `acore`.
 
 ## Installed Modules (`modules/`)
 
-These are cloned and will be compiled automatically when `MODULES=static`:
-
 | Module | Purpose |
 |--------|---------|
-| `mod-ah-bot` | Populates the Auction House with bot listings |
+| `mod-ah-bot` | Populates Auction House with bot listings |
 | `mod-autobalance` | Scales dungeon/raid difficulty to party size |
 | `mod-transmog` | Transmogrification NPC and system |
-| `mod-npc-buffer` | NPC that casts buffs on players for free |
+| `mod-npc-buffer` | NPC that casts buffs on players |
+| `mod-1v1-arena` | 1v1 arena system |
+| `mod-ar-ac` | Arena ratings |
+| `mod-cfbg` | Cross-faction battlegrounds |
+| `mod-faction-icons` | Faction icons in chat |
+| `mod-gain-honor-guard` | Honor gain for guards |
+| `mod-learn-spells` | Auto-learn spells on level |
+| `mod-npc-services` | Service NPC |
+| `mod-pvp-titles` | PvP title rewards |
+| `mod-skip-dk-starting-area` | Skip DK intro |
+| `mod-world-chat` | Global chat channel |
+| `mod-zone-difficulty` | Per-zone difficulty scaling |
+| `mod-playerbots` | 500 AI bots (built into core) |
 
-Each module has its own SQL files under `modules/<name>/data/sql/` that are auto-applied on first worldserver start.
+## Planned Additions
+
+- **Eluna Lua engine** (`-DELUNA=1`) — prerequisite for all Lua scripts
+- **Prestige-and-Draft-Mode** (`https://github.com/Youpeoples/Prestige-and-Draft-Mode`) — classless random spell draft per level-up, prestige reset system. Core of the Bleach server vision.
+- **OnApplyWeaponDamage hook** (cherry-pick `87fbdb796`) — C++ core change, needs rebuild
+- **AzerothCore catalogue modules** — assess each individually: SQL/Lua = safe to add, C++ = needs rebuild + compat test with playerbot branch
+
+### Module addition strategy
+1. SQL-only scripts: drop in and apply, zero risk
+2. Lua scripts: require Eluna build first, then just drop `.lua` files
+3. C++ modules: clone to `modules/`, rebuild, test bot stability
+4. Core patches: cherry-pick carefully, test merge conflicts with playerbot branch
+5. **Always take a DB backup + git tag before adding anything new**
+
+## Bot Configuration
+
+Config file: `~/azeroth-server/etc/modules/playerbots.conf`
+
+Key settings (current):
+- `AiPlayerbot.MinRandomBots = 500` / `MaxRandomBots = 500`
+- `AiPlayerbot.RandomBotAccountCount = 120`
+- `AiPlayerbot.ReactDelay = 300` (slowed for performance)
+- `AiPlayerbot.DisabledWithoutRealPlayer = 1` ← bots only run when players are online
+- `AiPlayerbot.RpgDelay = 5000` (active/busy behavior)
+
+**Bots log in 30 seconds after first real player, log out 5 min after last real player leaves.**
+
+## Session & Performance Settings
+
+In `worldserver.conf`:
+- `SocketTimeOutTime = 600000` — kick idle players at character select after 10 min
+- `SocketTimeOutTimeActive = 600000` — kick idle in-world players after 10 min
+- `MapUpdate.Threads = 1`
+- WSL memory limit: 12GB, 6 processors (`~/.wslconfig`)
+
+**If worldserver hits ~100% CPU after long uptime:** restart it (`server restart 5` in console). Root cause is bots running with no players — fixed by `DisabledWithoutRealPlayer = 1`.
+
+## Startup Procedure
+
+1. **Windows reboot auto-fix:** Scheduled task `SoulSurvivors-Portproxy` runs at boot as SYSTEM, auto-detects WSL IP and sets portproxy rules for ports 3724 and 8085. Script at `C:\Users\sykx\startup-wow-server.ps1`. If portproxy breaks, run the script manually as Administrator.
+
+2. Open WSL terminal — start authserver: `~/azeroth-server/bin/authserver`
+3. Open second WSL terminal — start worldserver: `~/azeroth-server/bin/worldserver`
+4. Wait for `AC>` prompt before connecting
+5. Set `realmlist.wtf` to `192.168.40.181` (LAN/host play)
+6. Launch WoW client
+
+**Realmlist DB is set to `192.168.40.181` for local/LAN play. For external friends switch to `24.101.102.96` once port forwarding is confirmed working.**
+
+**ProtonVPN must be OFF during server operation.**
+
+## Known Connection Issues & Fixes
+
+**"Bounced back to realm selection" every session:** Almost always caused by one of:
+1. Portproxy rules stale (WSL IP changed after reboot) → run `C:\Users\sykx\startup-wow-server.ps1` as Admin
+2. Realmlist DB set to wrong IP → `UPDATE acore_auth.realmlist SET address='192.168.40.181', localAddress='192.168.40.181', localSubnetMask='255.255.255.0' WHERE id=1;`
+3. Worldserver overloaded (check CPU with `ps aux | grep worldserver`) → `server restart 5` in console
+
+**Bots killing CPU:** Both settings required together:
+- `AiPlayerbot.RandomBotLoginAtStartup = 0` — bots don't load on server start
+- `AiPlayerbot.DisabledWithoutRealPlayer = 1` — bots only load 30s after a real player logs in
+
+**AHBot killing CPU:** `ItemsPerCycle = 20` (was 200). If it spikes again, set `Account = 0` temporarily.
+
+## Save Points & Version Control
+
+```bash
+# Tag a working state
+git tag -a "working-YYYY-MM-DD" -m "Description"
+git push origin Playerbot
+git push origin --tags
+
+# Restore code to a tag
+git checkout working-YYYY-MM-DD
+
+# Restore DB from backup
+for db in acore_auth acore_characters acore_world acore_playerbots; do
+  gunzip -c ~/SS/backups/YYYY-MM-DD/$db.sql.gz | mysql -u acore -pacore $db
+done
+```
+
+**Always backup DB + tag git before any destructive change.**
+
+Current stable tag: `working-2026-03-24`
+
+## Branch Divergence Policy
+
+This branch (Playerbot) already diverges from upstream AzerothCore. Each core patch cherry-picked increases divergence. Strategy:
+- Pull upstream playerbot branch updates periodically, resolve conflicts manually
+- Keep a log of all core patches applied (cherry-picks, custom changes) so conflicts are predictable
+- Prefer modules over core patches wherever possible
 
 ## Architecture
 
 ### Two server executables
-- **authserver** (`src/server/apps/authserver/`): Authentication and realm selection
-- **worldserver** (`src/server/apps/worldserver/`): All gameplay
+- **authserver**: Authentication and realm selection
+- **worldserver**: All gameplay
 
 ### Source layout
-- `src/common/` — Networking, crypto, config, logging, threading, utilities
-- `src/server/game/` — Core game logic (~52 subsystems): Entities, Spells, Maps, AI, Handlers, Scripting, Server
-- `src/server/scripts/` — Boss/spell/instance/command content scripts
-- `src/server/database/` — Database abstraction layer
-- `src/server/shared/` — Shared between auth and world servers
+- `src/common/` — Networking, crypto, config, logging, threading
+- `src/server/game/` — Core game logic (~52 subsystems)
+- `src/server/scripts/` — Boss/spell/instance/command scripts
+- `src/server/database/` — Database abstraction
+- `src/server/shared/` — Shared between auth and world
 
-### Playerbot system (built into core)
-Playerbot source lives under `src/server/game/AI/PlayerAI/` or similar. Key concepts:
-- Bots are real player accounts spawned by the server — they appear in the world as players
-- Bot behavior is driven by `PlayerbotAI` and strategy selectors
-- Config: `worldserver.conf` section `[Playerbot]` — controls bot count, login behavior, strategy
-- Bots can be added via GM command: `.bot add <name>` or auto-spawned at startup
+### Playerbot system
+- Bots are real player accounts spawned by the server
+- Bot behavior driven by `PlayerbotAI` and strategy selectors
+- Source: `modules/mod-playerbots/src/`
 
-### Three databases
-- `acore_auth` — Accounts, realm list
-- `acore_characters` — Characters, inventories, progress
-- `acore_world` — Game content (creatures, items, quests, loot)
-
-SQL updates: `data/sql/updates/pending_*/<db>/` until merged, then `data/sql/updates/<db>/`.
-
-### Scripting system
-Scripts inherit from `SpellScript`, `CreatureScript`, `InstanceMapScript`, etc. Each script file implements `AddSC_*()` which is called from regional `*_script_loader.cpp` files.
-
-## Configuration for 600 Bots
-
-In `$HOME/azeroth-server/etc/worldserver.conf`, set:
-
-```ini
-# Playerbot settings
-PlayerbotAI.enabled = 1
-PlayerbotAI.maxNumBots = 600
-PlayerbotAI.BotAutologin = 1
-PlayerbotAI.numMinBots = 500
-PlayerbotAI.RandomBotAccountPrefix = "rndbot"
-PlayerbotAI.RandomBotAccountCount = 200
-PlayerbotAI.RandomBotSpawnDelay = 1000
-
-# Spread bots across races and classes
-PlayerbotAI.RandomBotMapsAsString = "0 1 530 571"
-```
-
-Create bot accounts with the in-game GM command:
-```
-.playerbot random init
-```
-Or via the worldserver console after first start.
-
-## AH Bot Configuration
-
-In `$HOME/azeroth-server/etc/worldserver.conf` (added by mod-ah-bot):
-```ini
-AHBot.EnableSeller = 1
-AHBot.EnableBuyer = 1
-AHBot.Account = 1          # AH bot account ID (create a dedicated account)
-AHBot.GUID = 1             # Character GUID of the AH bot character
-AHBot.ItemsPerCycle = 200
-```
-After first start, use `.ahbot items` in-game to check status.
-
-## Autobalance Configuration
-
-In `worldserver.conf` (added by mod-autobalance):
-```ini
-AutoBalance.enable = 1
-AutoBalance.LevelScaling = 1
-AutoBalance.PlayerChangeNotify = 1
-AutoBalance.DungeonScaleDownXP = 0
-```
-
-## Friends Joining (Network Setup)
-
-For friends to connect from outside your LAN:
-1. **Forward ports** on your router: TCP/UDP 3724 (auth) and TCP 8085 (world)
-2. In `acore_auth` DB, update the realmlist: `UPDATE realmlist SET address = 'YOUR_PUBLIC_IP' WHERE id = 1;`
-3. Friends set their `realmlist.wtf` to: `set realmlist YOUR_PUBLIC_IP`
-4. Create accounts for friends with: `.account create <username> <password>` in worldserver console
-
-For LAN-only play: use your LAN IP instead of public IP.
+SQL updates: `data/sql/updates/pending_*/<db>/` until merged.
 
 ## Commit Message Format
 
@@ -192,7 +234,7 @@ For LAN-only play: use your LAN IP instead of public IP.
 Type(Scope): Short description
 ```
 Types: feat, fix, refactor, style, docs, test, chore
-Scopes: Core (C++), DB (SQL)
+Scopes: Core (C++), DB (SQL), Config, Module
 
 ## Code Style
 
