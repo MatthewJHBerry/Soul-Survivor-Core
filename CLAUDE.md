@@ -88,8 +88,8 @@ for db in acore_auth acore_characters acore_world acore_playerbots; do
 done
 
 # Restore
-for db in acore_auth acore_characters acore_world acore_playerbots; do
-  gunzip -c ~/SS/backups/YYYY-MM-DD/$db.sql.gz | mysql -u acore -pacore $db
+for db in acore_auth acore_characters acore_world acore_playerbots acore_ale; do
+  gunzip -c ~/SS/backups/YYYY-MM-DD/$db.sql.gz | mysql -u root $db
 done
 ```
 
@@ -180,6 +180,72 @@ In `worldserver.conf`:
 
 **AHBot killing CPU:** `ItemsPerCycle = 20` (was 200). If it spikes again, set `Account = 0` temporarily.
 
+## Lua Scripts Version Control
+
+Lua scripts have their own git repo at `~/azeroth-server/lua_scripts/` (separate from the core repo).
+
+```bash
+cd ~/azeroth-server/lua_scripts
+git add -A && git commit -m "description"
+```
+
+Key scripts and their purpose:
+| Script | Purpose |
+|--------|---------|
+| `spell_choice.lua` | Draft Mode — spell selection on level-up |
+| `prestige_chromie.lua` | Prestige/reset NPC gossip |
+| `prestige_and_spell_choice_config.lua` | Draft config (start level, rerolls, pool size) |
+| `stat_boost_system.lua` | 4 random stat boost choices per draft level |
+| `wanderer_start.lua` | Race restriction (Human only for players), Wanderer welcome |
+| `spell_history_server.lua` | Spell history popup server handler |
+| `paragon_*.lua` | Paragon XP/stat system (requires `acore_ale` DB) |
+| `_package_aliases.lua` | ALE require() compatibility shim |
+| `classic.lua` | OOP library (sets `_G.Object` global for paragon) |
+| `.client_addons/SpellChoice.lua` | Draft UI client code |
+| `.client_addons/spell_history_client.lua` | Spell history popup client |
+
+**AIO addon distribution:** Server uses `AIO.AddAddon(path)` to push client code to players on login.
+Client addons in `.client_addons/` — ALE skips this dir (starts with `.`), AIO distributes contents.
+
+**Draft system config** (`prestige_and_spell_choice_config.lua`):
+- `DRAFT_START_LEVEL = 10` — wanderers quest freely until level 10
+- `STAT_BOOST_COUNT = 4` — 4 extra stat boost choices per level-up
+- `DRAFT_MODE_SPELLS = 3` — spell choices per level
+- `POOL_AMOUNT = 45` — spell pool size (increase carefully)
+
+**Custom DB tables** (acore_characters):
+- `prestige_stats` — draft state, rerolls, bans per player
+- `drafted_spells` — all spells chosen via draft
+- `draft_level_history` — history of choices per level (powers spell history UI)
+- `draft_bans` — spells a player has banned
+- `character_stat_boosts` — cumulative stat boosts from draft choices
+
+**Custom DB** (acore_ale): Paragon system tables (auto-created on first load)
+
+## Planned Features (Next Sessions)
+
+### Human Race / Character Creation
+- Players: Human only (enforced via `wanderer_start.lua` server-side kick on creation)
+- "Body type" subrace system: NPC after login lets player pick size variant (morph from human/gnome/elf/etc models) — all remain Human race ID for faction/bot compatibility
+- Hollow race: separate DBC model + client patch via `build-mpq`
+- Bots: keep all races — they need variety for world population
+
+### FFXI-style Combat System (Major C++ project)
+- **Manual Attack (Strike)**: Replace auto-attack feel; give all level-1s a Strike ability
+  - Short-term: Give `Heroic Strike r1` (renamed to Strike) at creation — manual feel
+  - Long-term: C++ hook to disable auto-attack for player race=1 characters
+- **TP/Weapon Skill bar**: New resource (0-1000 TP), fills on melee hits, drains on Weapon Skills
+  - Requires C++ new power type OR persistent aura tracking
+  - Client: AIO addon HUD bar
+- **Stamina bar**: New resource, drains on run/jump/dodge/attack, regens at rest
+- **Skill Chains**: 2-3 Weapon Skills in sequence trigger elemental burst
+- **Sense ability**: Show mana-charging enemies from range (beam effect)
+
+### UI Theme (Black/Gold — ongoing)
+- All custom AIO windows use: `bgFile="Interface\\DialogFrame\\UI-DialogBox-Background-Dark"`, gold border `#C9A84C`
+- Spell History popup: `/ssh` or `.history` — LIVE
+- Custom spellbook: planned (AIO addon, replaces WoW spellbook for draft players)
+
 ## Save Points & Version Control
 
 ```bash
@@ -192,8 +258,8 @@ git push origin --tags
 git checkout working-YYYY-MM-DD
 
 # Restore DB from backup
-for db in acore_auth acore_characters acore_world acore_playerbots; do
-  gunzip -c ~/SS/backups/YYYY-MM-DD/$db.sql.gz | mysql -u acore -pacore $db
+for db in acore_auth acore_characters acore_world acore_playerbots acore_ale; do
+  gunzip -c ~/SS/backups/YYYY-MM-DD/$db.sql.gz | mysql -u root $db
 done
 ```
 
