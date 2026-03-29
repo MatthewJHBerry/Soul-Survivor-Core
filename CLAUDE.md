@@ -18,12 +18,12 @@ This is the **mod-playerbots fork** of AzerothCore (`https://github.com/mod-play
 
 ## Network & Hosting
 
-- Friends connect via **Tailscale** — they install Tailscale, get approved, set `realmlist.wtf` to `100.107.146.103`
-- Realmlist DB must match: `UPDATE acore_auth.realmlist SET address='100.107.146.103' WHERE id=1;`
+**Primary connection: Tailscale VPN** (no port forwarding needed)
+- Friends install Tailscale, get approved on your network, set `realmlist.wtf` to `100.107.146.103`
+- Realmlist DB: `UPDATE acore_auth.realmlist SET address='100.107.146.103' WHERE id=1;`
 - Your local `realmlist.wtf`: `set realmlist 100.107.146.103`
 - **ProtonVPN must be OFF** while server is running — it breaks Tailscale routing
 - Never expose MySQL port 3306 publicly
-- For truly public hosting: forward TCP/UDP 3724 and TCP 8085 on router only
 
 **Create friend accounts** (worldserver console only, not in-game chat):
 ```
@@ -115,12 +115,11 @@ done
 | `mod-world-chat` | Global chat channel |
 | `mod-zone-difficulty` | Per-zone difficulty scaling |
 | `mod-playerbots` | 500 AI bots (built into core) |
+| `mod-ale` | **LIVE** — ALE Lua engine (AzerothCore Lua Extension); hot-reload with `.reload ale` |
 
-## Planned Additions
+## Planned Additions (C++ — requires rebuild)
 
-- **Eluna Lua engine** (`-DELUNA=1`) — prerequisite for all Lua scripts
-- **Prestige-and-Draft-Mode** (`https://github.com/Youpeoples/Prestige-and-Draft-Mode`) — classless random spell draft per level-up, prestige reset system. Core of the Bleach server vision.
-- **OnApplyWeaponDamage hook** (cherry-pick `87fbdb796`) — C++ core change, needs rebuild
+- **OnApplyWeaponDamage hook** (cherry-pick `87fbdb796`) — C++ core change, needed for FFXI-style TP system
 - **AzerothCore catalogue modules** — assess each individually: SQL/Lua = safe to add, C++ = needs rebuild + compat test with playerbot branch
 
 ### Module addition strategy
@@ -160,10 +159,11 @@ In `worldserver.conf`:
 2. Open WSL terminal — start authserver: `~/azeroth-server/bin/authserver`
 3. Open second WSL terminal — start worldserver: `~/azeroth-server/bin/worldserver`
 4. Wait for `AC>` prompt before connecting
-5. Set `realmlist.wtf` to `192.168.40.181` (LAN/host play)
+5. Set `realmlist.wtf` to `100.107.146.103` (Tailscale — works for local host AND friends)
 6. Launch WoW client
 
-**Realmlist DB is set to `192.168.40.181` for local/LAN play. For external friends switch to `24.101.102.96` once port forwarding is confirmed working.**
+**Realmlist DB uses Tailscale IP:** `UPDATE acore_auth.realmlist SET address='100.107.146.103' WHERE id=1;`
+**Everyone (local + friends) uses `realmlist.wtf`: `set realmlist 100.107.146.103`**
 
 **ProtonVPN must be OFF during server operation.**
 
@@ -171,8 +171,9 @@ In `worldserver.conf`:
 
 **"Bounced back to realm selection" every session:** Almost always caused by one of:
 1. Portproxy rules stale (WSL IP changed after reboot) → run `C:\Users\sykx\startup-wow-server.ps1` as Admin
-2. Realmlist DB set to wrong IP → `UPDATE acore_auth.realmlist SET address='192.168.40.181', localAddress='192.168.40.181', localSubnetMask='255.255.255.0' WHERE id=1;`
+2. Realmlist DB set to wrong IP → `UPDATE acore_auth.realmlist SET address='100.107.146.103' WHERE id=1;`
 3. Worldserver overloaded (check CPU with `ps aux | grep worldserver`) → `server restart 5` in console
+4. Tailscale not running → start Tailscale on Windows before launching WoW
 
 **Bots killing CPU:** Both settings required together:
 - `AiPlayerbot.RandomBotLoginAtStartup = 0` — bots don't load on server start
@@ -192,26 +193,37 @@ git add -A && git commit -m "description"
 Key scripts and their purpose:
 | Script | Purpose |
 |--------|---------|
-| `spell_choice.lua` | Draft Mode — spell selection on level-up |
+| `spell_choice.lua` | Draft Mode — spell selection on level-up (server) |
 | `prestige_chromie.lua` | Prestige/reset NPC gossip |
 | `prestige_and_spell_choice_config.lua` | Draft config (start level, rerolls, pool size) |
 | `stat_boost_system.lua` | 4 random stat boost choices per draft level |
-| `wanderer_start.lua` | Race restriction (Human only for players), Wanderer welcome |
+| `awakened_start.lua` | Race restriction (Human only for players), Awakened welcome |
 | `spell_history_server.lua` | Spell history popup server handler |
 | `paragon_*.lua` | Paragon XP/stat system (requires `acore_ale` DB) |
 | `_package_aliases.lua` | ALE require() compatibility shim |
 | `classic.lua` | OOP library (sets `_G.Object` global for paragon) |
-| `.client_addons/SpellChoice.lua` | Draft UI client code |
+| `faction_npc.lua` | "The Weaver" — faction choice NPC (entry 9000001, 8 factions) |
+| `.client_addons/SpellChoice.lua` | Draft UI — 8 spell cards, /timeline, /draftline, /draftscale |
 | `.client_addons/spell_history_client.lua` | Spell history popup client |
+| `.client_addons/TPBar.lua` | TP (Tactical Points) bar — blue HUD bar below stamina, fills on melee |
 
 **AIO addon distribution:** Server uses `AIO.AddAddon(path)` to push client code to players on login.
 Client addons in `.client_addons/` — ALE skips this dir (starts with `.`), AIO distributes contents.
+`SpellChoice.lua` is loaded via the `PrestigeSystem` WoW addon (traditional), NOT AIO — use `/reload` in client, no relog needed.
 
 **Draft system config** (`prestige_and_spell_choice_config.lua`):
-- `DRAFT_START_LEVEL = 10` — wanderers quest freely until level 10
-- `STAT_BOOST_COUNT = 4` — 4 extra stat boost choices per level-up
-- `DRAFT_MODE_SPELLS = 3` — spell choices per level
+- `DRAFT_START_LEVEL = 10` — players quest freely until level 10
+- `STAT_BOOST_COUNT = 4` — 4 extra stat boost choices per draft level
+- `DRAFT_MODE_SPELLS = 3` — spell choices per level (UI supports up to 8 buttons)
 - `POOL_AMOUNT = 45` — spell pool size (increase carefully)
+
+**Draft UI key facts** (`.client_addons/SpellChoice.lua`):
+- 8 spell buttons, all using `SpellChoiceButtonTemplate` (256×256 card, scaled to 0.5 by default)
+- Spell name displays ABOVE the card in a dark backdrop frame (`btn.nameBg`, 32pt font)
+- Rarity colored dot: `WHITE8x8` + `SetVertexColor` — no external texture files required
+- `/timeline` or `/draftline` — opens scrollable Draft Timeline history panel
+- `/draftscale <n>` — resize all spell buttons live (0.2–2.0)
+- DraftTimeline panel is inlined directly in SpellChoice.lua
 
 **Custom DB tables** (acore_characters):
 - `prestige_stats` — draft state, rerolls, bans per player
@@ -219,13 +231,14 @@ Client addons in `.client_addons/` — ALE skips this dir (starts with `.`), AIO
 - `draft_level_history` — history of choices per level (powers spell history UI)
 - `draft_bans` — spells a player has banned
 - `character_stat_boosts` — cumulative stat boosts from draft choices
+- `player_faction` — faction chosen via The Weaver NPC
 
 **Custom DB** (acore_ale): Paragon system tables (auto-created on first load)
 
 ## Planned Features (Next Sessions)
 
 ### Human Race / Character Creation
-- Players: Human only (enforced via `wanderer_start.lua` server-side kick on creation)
+- Players: Human only (enforced via `awakened_start.lua` server-side kick on creation)
 - "Body type" subrace system: NPC after login lets player pick size variant (morph from human/gnome/elf/etc models) — all remain Human race ID for faction/bot compatibility
 - Hollow race: separate DBC model + client patch via `build-mpq`
 - Bots: keep all races — they need variety for world population
@@ -266,6 +279,7 @@ done
 **Always backup DB + tag git before any destructive change.**
 
 Current stable tag: `working-2026-03-24`
+Last known good lua_scripts commit: `eeb807a` (draft popup consistency fixes, login grace period)
 
 ## Branch Divergence Policy
 
